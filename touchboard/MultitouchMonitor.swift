@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import os
 
 /// One finger currently pressing the trackpad.
 /// `x` and `y` are normalized 0...1, origin at the bottom-left of the trackpad.
@@ -37,11 +38,52 @@ private typealias MTContactCallback = @convention(c) (MTDeviceRef?, UnsafeMutabl
 /// MultitouchSupport finger states: 3 = touch began, 4 = touching.
 private let touchingStates: Set<Int32> = [3, 4]
 
+/// Decides, on the trackpad's own thread, which frames are worth sending to the main thread.
+/// Normal mouse use (1–3 fingers with the keyboard closed) is dropped here, so the app stays idle.
+final class TrackpadFrameGate: @unchecked Sendable {
+    private struct State {
+        var keyboardOpen = false
+        /// Devices whose latest forwarded frame had fingers down, so their "all lifted" frame still goes through.
+        var devicesWithFingersDown: Set<Int> = []
+    }
+
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+
+    func setKeyboardOpen(_ open: Bool) {
+        lock.withLock { $0.keyboardOpen = open }
+    }
+
+    func shouldForward(device: Int, touching: Int) -> Bool {
+        lock.withLock { state in
+            let wanted = state.keyboardOpen || touching >= 4 || state.devicesWithFingersDown.contains(device)
+            guard wanted else { return false }
+            if touching > 0 {
+                state.devicesWithFingersDown.insert(device)
+            } else {
+                state.devicesWithFingersDown.remove(device)
+            }
+            return true
+        }
+    }
+}
+
+let trackpadFrameGate = TrackpadFrameGate()
+
 private let contactFrameCallback: MTContactCallback = { device, data, count, _, _ in
+    let deviceID = device.map { Int(bitPattern: $0) } ?? 0
+    let fingers = data.map { $0.bindMemory(to: MTFinger.self, capacity: Int(max(count, 0))) }
+
+    // Count fingers first without allocating anything, and stop early when the frame isn't needed.
+    var touching = 0
+    if let fingers {
+        for i in 0..<Int(max(count, 0)) where touchingStates.contains(fingers[i].state) { touching += 1 }
+    }
+    guard trackpadFrameGate.shouldForward(device: deviceID, touching: touching) else { return 0 }
+
     var contacts: [TrackpadContact] = []
-    if let data, count > 0 {
-        let fingers = data.bindMemory(to: MTFinger.self, capacity: Int(count))
-        for i in 0..<Int(count) {
+    contacts.reserveCapacity(touching)
+    if let fingers {
+        for i in 0..<Int(max(count, 0)) {
             let finger = fingers[i]
             guard touchingStates.contains(finger.state) else { continue }
             contacts.append(TrackpadContact(id: Int(finger.identifier),
@@ -49,7 +91,6 @@ private let contactFrameCallback: MTContactCallback = { device, data, count, _, 
                                             y: Double(finger.normalized.pos.y)))
         }
     }
-    let deviceID = device.map { Int(bitPattern: $0) } ?? 0
     DispatchQueue.main.async {
         MainActor.assumeIsolated {
             MultitouchMonitor.shared.onFrame?(deviceID, contacts)

@@ -1,6 +1,15 @@
 import AppKit
 import SwiftUI
 
+/// Finger position and key highlights. These change up to ~100 times a second while typing, so they
+/// live apart from the controller: only the keyboard view watches them, not the status window or menu bar.
+@MainActor
+final class KeyboardLiveState: ObservableObject {
+    @Published fileprivate(set) var fingerPoint: CGPoint?
+    @Published fileprivate(set) var hoveredKeyID: String?
+    @Published fileprivate(set) var pressedKeyID: String?
+}
+
 /// Drives the virtual keyboard:
 /// - 5-finger swipe down on the trackpad opens / closes it
 /// - one finger moves the pointer over the keys
@@ -32,12 +41,13 @@ final class TouchKeyboardController: ObservableObject {
         }
     }
 
-    @Published private(set) var isActive = false
-    @Published private(set) var fingerPoint: CGPoint?
-    @Published private(set) var hoveredKeyID: String?
-    @Published private(set) var pressedKeyID: String?
+    @Published private(set) var isActive = false {
+        didSet { trackpadFrameGate.setKeyboardOpen(isActive) }
+    }
     @Published private(set) var trackpadFound = false
     @Published private(set) var accessibilityGranted = AccessibilityPermission.isGranted
+
+    let live = KeyboardLiveState()
 
     private let monitor = MultitouchMonitor.shared
     private let pointerBlocker = PointerBlocker()
@@ -173,19 +183,21 @@ final class TouchKeyboardController: ObservableObject {
         let contact = contacts.first { $0.id == trackedFingerID } ?? contacts[0]
         trackedFingerID = contact.id
         let point = KeyboardLayout.point(fromTrackpadX: contact.x, y: contact.y)
-        fingerPoint = point
-        hoveredKeyID = KeyboardLayout.key(at: point)?.id
+        if live.fingerPoint != point { live.fingerPoint = point }
+        let keyID = KeyboardLayout.key(at: point)?.id
+        if live.hoveredKeyID != keyID { live.hoveredKeyID = keyID }
     }
 
     /// Forget the current finger without typing anything.
+    /// Only touches published values that actually change, so idle frames don't trigger redraws.
     private func cancelFinger() {
         trackedFingerID = nil
-        fingerPoint = nil
-        hoveredKeyID = nil
+        if live.fingerPoint != nil { live.fingerPoint = nil }
+        if live.hoveredKeyID != nil { live.hoveredKeyID = nil }
     }
 
     private func typeHoveredKey() {
-        guard isActive, trackedFingerID != nil, let id = hoveredKeyID,
+        guard isActive, trackedFingerID != nil, let id = live.hoveredKeyID,
               let key = KeyboardLayout.keys.first(where: { $0.id == id }) else { return }
         press(key)
     }
@@ -204,10 +216,11 @@ final class TouchKeyboardController: ObservableObject {
         } else {
             send()
         }
-        pressedKeyID = key.id
+        live.pressedKeyID = key.id
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             MainActor.assumeIsolated {
-                if self?.pressedKeyID == key.id { self?.pressedKeyID = nil }
+                guard let live = self?.live else { return }
+                if live.pressedKeyID == key.id { live.pressedKeyID = nil }
             }
         }
     }

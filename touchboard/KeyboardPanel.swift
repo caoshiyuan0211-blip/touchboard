@@ -9,7 +9,7 @@ final class KeyboardPanel: NSPanel {
     private let host: NSHostingView<AnyView>
 
     init(controller: TouchKeyboardController) {
-        host = NSHostingView(rootView: AnyView(KeyboardView().environmentObject(controller)))
+        host = NSHostingView(rootView: AnyView(KeyboardView(live: controller.live).environmentObject(controller)))
         let size = Self.panelSize(keyboardWidth: controller.keyboardWidth)
         super.init(contentRect: NSRect(origin: .zero, size: size),
                    styleMask: [.borderless, .nonactivatingPanel],
@@ -73,6 +73,7 @@ final class KeyboardPanel: NSPanel {
 
 struct KeyboardView: View {
     @EnvironmentObject private var controller: TouchKeyboardController
+    @ObservedObject var live: KeyboardLiveState
 
     static func padding(for width: CGFloat) -> CGFloat { max(8, width * 0.02) }
 
@@ -86,13 +87,13 @@ struct KeyboardView: View {
                 ForEach(KeyboardLayout.keys) { key in
                     KeyCapView(key: key,
                                unit: unit,
-                               isHovered: controller.hoveredKeyID == key.id,
-                               isPressed: controller.pressedKeyID == key.id)
+                               isHovered: live.hoveredKeyID == key.id,
+                               isPressed: live.pressedKeyID == key.id)
                         .frame(width: key.frame.width * unit - gap, height: key.frame.height * unit - gap)
                         .position(x: key.frame.midX * unit, y: key.frame.midY * unit)
                 }
 
-                if let p = controller.fingerPoint {
+                if let p = live.fingerPoint {
                     let dot = max(10, unit * 0.4)
                     Circle()
                         .fill(Color.red.opacity(0.8))
